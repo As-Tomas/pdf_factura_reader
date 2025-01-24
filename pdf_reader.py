@@ -2,68 +2,56 @@
 import os
 import re
 import pdfplumber
-
-# Nurodykite savo pagrindinį katalogą, kur yra subkatalogai
+import pandas as pd
+from datetime import datetime
 import sys
+
+def get_base_dir():
+    if len(sys.argv) > 1:
+        base_dir = sys.argv[1]
+        if not os.path.exists(base_dir):
+            print(f"Error: Directory {base_dir} does not exist!")
+            sys.exit(1)
+        return base_dir
+    else:
+        print("Error: Please provide a directory path as argument")
+        print("Usage: python pdf_reader.py <directory_path>")
+        sys.exit(1)
+
+# Get the base directory from command line argument
 print(f"Current working directory: {os.getcwd()}")
-BASE_DIR = os.path.join(os.getcwd(), "testPDFsFolder")
+BASE_DIR = get_base_dir()
 print(f"Looking for PDFs in: {BASE_DIR}")
 
-if not os.path.exists(BASE_DIR):
-    print(f"Error: Directory {BASE_DIR} does not exist!")
-    sys.exit(1)
-
-# Reguliarioji išraiška tikrinanti failo pavadinimą, pvz. "351708-351708-1.pdf"
+# Regular expressions for file name and data extraction
 pdf_name_pattern = re.compile(r'^\d+-\d+-\d+\.pdf$', re.IGNORECASE)
-
-# Reguliariosios išraiškos šablonai vertėms ištraukti
-invoice_pattern = re.compile(r"Invoice\s+(\d+)")  # Pattern for invoice number
+invoice_pattern = re.compile(r"Invoice\s+(\d+)")
 bestillingsnr_pattern = re.compile(r"Bestillingsnr\.:\s*([^\n]+)")
 leverandor_pattern = re.compile(r"Leverandør:\s*([^\n]+)")
-
-# Šablonai lentelės duomenims
-# KID yra pirmame stulpelyje
 kid_pattern = re.compile(r"KID:\s*(\d+)")
-
-# Mva. beløp yra stulpelyje (ieškome po "Mva. beløp" žodžių)
 mva_belop_pattern = re.compile(r"beløp\s+(\d+[.,]\d+)")
-
-# Total yra paskutiniame stulpelyje (po "NOK" arba tiesiog "Total")
 total_pattern = re.compile(r"(?:NOK|Valuta)\s+Total\s*\n*(\d+[.,]\d+)")
-
-# Papildomi šablonai
 alt_kid_pattern = re.compile(r"KID\s+(\d+)")
 alt_mva_pattern = re.compile(r"Mva\.\s*beløp\s+(\d+[.,]\d+)")
 alt_total_pattern = re.compile(r"Total\s*\n*(\d+[.,]\d+)")
 
-# Funkcija lentelės eilutės analizei
-def parse_table_row(text, row_pattern):
-    match = row_pattern.search(text)
-    if match:
-        return match.group(1)
-    return None
-
-# Funkcija eilutės išvalymui nuo nereikalingų simbolių
 def clean_text(text):
     if text:
-        # Pašaliname visus nereikalingus tarpus
         text = ' '.join(text.split())
-        # Standardize "ORDER" or "Order" to "Order"
         text = re.sub(r'(?i)order\b', 'Order', text)
         return text.strip()
     return None
 
-# Funkcija skaičių formatavimui
 def format_number(value):
     if value:
-        # Pašaliname tarpus
         value = value.replace(" ", "")
-        # Pakeičiame kablelius į taškus
         value = value.replace(",", ".")
         return value
     return None
 
-# Debug print to see what files we're finding
+# Initialize list to store all extracted data
+extracted_data = []
+
 print("Starting PDF processing...")
 
 for root, dirs, files in os.walk(BASE_DIR):
@@ -71,7 +59,6 @@ for root, dirs, files in os.walk(BASE_DIR):
     print(f"Found files: {files}")
     
     for filename in files:
-        # Tikrinam, ar failo pavadinimas atitinka "xxxxx-xxxxx-x.pdf" formatą
         print(f"Checking file: {filename}")
         if pdf_name_pattern.match(filename):
             print(f"Found matching PDF: {filename}")
@@ -79,86 +66,81 @@ for root, dirs, files in os.walk(BASE_DIR):
             
             try:
                 with pdfplumber.open(pdf_path) as pdf:
-                    # Extract text only from the first page
                     full_text = pdf.pages[0].extract_text() or ""
                     
-                    # Ištraukiame visas reikšmes, bandant alternatyvius šablonus jei reikia
+                    # Extract all values using patterns
                     bestillingsnr_match = bestillingsnr_pattern.search(full_text)
-                    if not bestillingsnr_match:
-                        bestillingsnr_match = alt_bestillingsnr_pattern.search(full_text)
-                    
                     leverandor_match = leverandor_pattern.search(full_text)
-                    
-                    kid_match = kid_pattern.search(full_text)
-                    if not kid_match:
-                        kid_match = alt_kid_pattern.search(full_text)
-                    
-                    mva_belop_match = mva_belop_pattern.search(full_text)
-                    if not mva_belop_match:
-                        mva_belop_match = alt_mva_pattern.search(full_text)
-                    
-                    total_match = total_pattern.search(full_text)
-                    
-                    # Extract invoice number
+                    kid_match = kid_pattern.search(full_text) or alt_kid_pattern.search(full_text)
+                    mva_belop_match = mva_belop_pattern.search(full_text) or alt_mva_pattern.search(full_text)
+                    total_match = total_pattern.search(full_text) or alt_total_pattern.search(full_text)
                     invoice_match = invoice_pattern.search(full_text)
                     
-                    # Išgauname ir formatuojame reikšmes
-                    invoice = clean_text(invoice_match.group(1)) if invoice_match else None
-                    bestillingsnr = clean_text(bestillingsnr_match.group(1)) if bestillingsnr_match else None
-                    leverandor = clean_text(leverandor_match.group(1)) if leverandor_match else None
-                    kid = kid_match.group(1).strip() if kid_match else None
+                    # Initialize data dictionary
+                    row_data = {
+                        "Mva.Gr.lag": None,
+                        "Mva. beløp:": None,
+                        "Total": None,
+                        "Bestillingsnr.": None,
+                        "Fakturanr.": None,
+                        "Leverandør:": None,
+                        "KID": None
+                    }
                     
-                    # Ieškome reikšmių lentelėje
-                    # Pirma ieškome eilutės su antraštėmis
+                    # Extract table values
                     header_pattern = re.compile(r"KID:\s*Mva\.\s*Mva\.Gr\.lag\s*Mva\.\s*beløp\s*Valuta\s*Total\s*\n")
                     header_match = header_pattern.search(full_text)
                     
                     if header_match:
-                        # Ieškome reikšmių eilutės po antraštėmis
                         values_start = header_match.end()
                         values_line = full_text[values_start:values_start+100].split('\n')[0]
-                        
-                        # Išskaidome reikšmių eilutę
                         values = values_line.strip().split()
+                        
                         if len(values) >= 6:
-                            kid = values[0]
-                            mva_grlag = format_number(values[2])  # Third element is Mva.Gr.lag
-                            mva_belop = format_number(values[3])  # Fourth element is Mva. beløp
-                            total = format_number(values[5])      # Sixth element is Total
-                    else:
-                        # Bandome rasti Mva. beløp
-                        mva_belop = None
-                        if mva_belop_match:
-                            mva_belop = format_number(mva_belop_match.group(1))
-                        elif alt_mva_pattern.search(full_text):
-                            alt_match = alt_mva_pattern.search(full_text)
-                            mva_belop = format_number(alt_match.group(1))
-                        
-                        # Initialize mva_grlag
-                        mva_grlag = None
-                        
-                        # Bandome rasti Total
-                        total = None
-                        if total_match:
-                            total = format_number(total_match.group(1))
-                        elif alt_total_pattern.search(full_text):
-                            alt_match = alt_total_pattern.search(full_text)
-                            total = format_number(alt_match.group(1))
+                            row_data.update({
+                                "KID": values[0],
+                                "Mva.Gr.lag": format_number(values[2]),
+                                "Mva. beløp:": format_number(values[3]),
+                                "Total": format_number(values[5])
+                            })
                     
-                    # Spausdiname rezultatą
-                    if all([invoice, bestillingsnr, leverandor, kid, mva_belop, mva_grlag, total]):
-                        print(f"\nFailas: {filename}")
-                        print(f"Katalogas: {root}")
-                        print(f"Fakturanr.: {invoice}")
-                        print(f"Leverandør: {leverandor}")
-                        print(f"Bestillingsnr.: {bestillingsnr}")
-                        print(f"KID: {kid}")
-                        print(f"Mva.Gr.lag: {mva_grlag}")
-                        print(f"Mva. beløp: {mva_belop}")
-                        print(f"Total: {total}")
+                    # Update remaining values
+                    if not row_data["Mva. beløp:"] and mva_belop_match:
+                        row_data["Mva. beløp:"] = format_number(mva_belop_match.group(1))
+                    
+                    if not row_data["Total"] and total_match:
+                        row_data["Total"] = format_number(total_match.group(1))
+                    
+                    if not row_data["KID"] and kid_match:
+                        row_data["KID"] = kid_match.group(1).strip()
+                    
+                    row_data.update({
+                        "Bestillingsnr.": clean_text(bestillingsnr_match.group(1)) if bestillingsnr_match else None,
+                        "Fakturanr.": clean_text(invoice_match.group(1)) if invoice_match else None,
+                        "Leverandør:": clean_text(leverandor_match.group(1)) if leverandor_match else None
+                    })
+                    
+                    # Add to extracted data if all required fields are present
+                    if any(row_data.values()):
+                        extracted_data.append(row_data)
+                        print(f"\nFile: {filename}")
+                        for key, value in row_data.items():
+                            print(f"{key}: {value}")
                         print("-" * 50)
                     else:
-                        print(f"({root}) Nepavyko rasti visų reikiamų duomenų faile: {filename}")
+                        print(f"({root}) Could not find all required data in file: {filename}")
             
             except Exception as e:
-                print(f"Klaida apdorojant failą {pdf_path}: {e}")
+                print(f"Error processing file {pdf_path}: {e}")
+
+# Create CSV file with current date
+if extracted_data:
+    current_date = datetime.now().strftime("%Y-%m-%d")
+    csv_filename = f"faktura data extraction {current_date}.csv"
+    
+    # Convert to DataFrame and save to CSV
+    df = pd.DataFrame(extracted_data)
+    df.to_csv(csv_filename, index=False, encoding='utf-8')
+    print(f"\nData has been saved to: {csv_filename}")
+else:
+    print("\nNo data was extracted from the PDFs")
