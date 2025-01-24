@@ -42,6 +42,12 @@ def clean_text(text):
         return text.strip()
     return None
 
+def clean_vendor_name(text):
+    if text:
+        # Take only the part before the dash and strip whitespace
+        return text.split('-')[0].strip()
+    return None
+
 def format_number(value):
     if value:
         value = value.replace(" ", "")
@@ -117,7 +123,7 @@ for root, dirs, files in os.walk(BASE_DIR):
                     row_data.update({
                         "Bestillingsnr.": clean_text(bestillingsnr_match.group(1)) if bestillingsnr_match else None,
                         "Fakturanr.": clean_text(invoice_match.group(1)) if invoice_match else None,
-                        "Leverandør:": clean_text(leverandor_match.group(1)) if leverandor_match else None
+                        "Leverandør:": clean_vendor_name(leverandor_match.group(1)) if leverandor_match else None
                     })
                     
                     # Add to extracted data if all required fields are present
@@ -133,14 +139,78 @@ for root, dirs, files in os.walk(BASE_DIR):
             except Exception as e:
                 print(f"Error processing file {pdf_path}: {e}")
 
-# Create CSV file with current date
+# Create CSV file with current date and add calculations
 if extracted_data:
     current_date = datetime.now().strftime("%Y-%m-%d")
     csv_filename = f"faktura data extraction {current_date}.csv"
     
-    # Convert to DataFrame and save to CSV
+    # Convert to DataFrame
     df = pd.DataFrame(extracted_data)
-    df.to_csv(csv_filename, index=False, encoding='utf-8')
+    
+    # Convert numeric columns to float and ensure KID is string
+    df['Mva.Gr.lag'] = pd.to_numeric(df['Mva.Gr.lag'], errors='coerce')
+    df['Mva. beløp:'] = pd.to_numeric(df['Mva. beløp:'], errors='coerce')
+    df['Total'] = pd.to_numeric(df['Total'], errors='coerce')
+    df['KID'] = df['KID'].astype(str)
+    
+    # Calculate totals by vendor with rounding
+    totals_by_vendor = df.groupby('Leverandør:').agg({
+        'Mva.Gr.lag': lambda x: round(x.sum(), 2),
+        'Mva. beløp:': lambda x: round(x.sum(), 2),
+        'Total': lambda x: round(x.sum(), 2)
+    }).reset_index()
+    
+    # Create empty rows and headers for the summary section
+    empty_rows = pd.DataFrame([{col: '' for col in df.columns}] * 2)
+    header_row = pd.DataFrame([{
+        'Leverandør:': 'TOTALS BY VENDOR:',
+        'Mva.Gr.lag': '',
+        'Mva. beløp:': '',
+        'Total': ''
+    }])
+    
+    # Create vendor totals rows
+    vendor_totals = pd.DataFrame([{
+        'Mva.Gr.lag': row['Mva.Gr.lag'],
+        'Mva. beløp:': row['Mva. beløp:'],
+        'Total': row['Total'],
+        'Leverandør:': row['Leverandør:']
+    } for _, row in totals_by_vendor.iterrows()])
+    
+    # Create grand totals row with rounding
+    grand_total_row = pd.DataFrame([{
+        'Mva.Gr.lag': round(df['Mva.Gr.lag'].sum(), 2),
+        'Mva. beløp:': round(df['Mva. beløp:'].sum(), 2),
+        'Total': round(df['Total'].sum(), 2),
+        'Leverandør:': 'GRAND TOTAL'
+    }])
+    
+    # Combine all parts
+    final_df = pd.concat([
+        df,  # Original data
+        empty_rows,  # Separation
+        header_row,  # "TOTALS BY VENDOR:" header
+        vendor_totals,  # Vendor totals
+        pd.DataFrame([{col: '' for col in df.columns}]),  # Empty row before grand total
+        grand_total_row  # Grand total row
+    ], ignore_index=True)
+    
+    # Save to CSV
+    final_df.to_csv(csv_filename, index=False, encoding='utf-8', float_format='%.2f')
+    
+    # Print the totals
+    print("\nTotals by vendor:")
+    for _, row in totals_by_vendor.iterrows():
+        print(f"\n{row['Leverandør:']}:")
+        print(f"Mva.Gr.lag total: {row['Mva.Gr.lag']:,.2f}")
+        print(f"Mva. beløp total: {row['Mva. beløp:']:,.2f}")
+        print(f"Total: {row['Total']:,.2f}")
+    
+    print("\nGRAND TOTALS:")
+    print(f"Mva.Gr.lag: {df['Mva.Gr.lag'].sum():,.2f}")
+    print(f"Mva. beløp: {df['Mva. beløp:'].sum():,.2f}")
+    print(f"Total: {df['Total'].sum():,.2f}")
+    
     print(f"\nData has been saved to: {csv_filename}")
 else:
     print("\nNo data was extracted from the PDFs")
